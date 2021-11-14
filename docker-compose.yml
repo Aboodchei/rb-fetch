@@ -1,0 +1,5 @@
+version: "3.9"
+services:
+  fetcher:
+    build: .
+    command: bash -c "./fetch"

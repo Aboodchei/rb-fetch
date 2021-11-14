@@ -1,0 +1,116 @@
+#!/usr/bin/env ruby
+
+require 'nokogiri'
+require 'open-uri'
+
+class Fetch
+  def initialize(links:, show_meta:, cache_assets:)
+    @links = links
+    @show_meta = show_meta
+    @cache_assets = cache_assets
+  end
+
+  def run
+    @links.each do |link|
+      begin
+        initialize_link_related_variables(link)
+        handle_meta_data
+        archive_assets if @cache_assets
+        File.write(@html_file_path, @document)
+        display_meta_data if @show_meta
+      rescue => e
+        puts e
+      end
+    end
+  end
+
+  private
+
+  def initialize_link_related_variables(link)
+    @uri = URI(link)
+    @document = Nokogiri::HTML(@uri.open)
+    @hostname = underscore(@uri.hostname)
+    @request_uri = underscore(@uri.request_uri)[1..-1]
+    @request_uri = '_' if @request_uri.empty?
+    @html_file_path = "#{__dir__}/#{@hostname}_#{@request_uri}.html"
+    @meta = {site: link}
+  end
+
+  def underscore(string)
+    string.to_s.gsub(/[^0-9A-Za-z]/, '_')
+  end
+
+  def archive_assets
+    {link: 'href', script: 'src', img: 'src'}.each do |el_type, attribute|
+      @document.css("#{el_type}[#{attribute}]").each do |elem|
+        begin
+          next if elem[attribute][0..4] == 'data:'
+          elem[attribute] = download_and_return_archived_path(elem[attribute])
+        rescue => e
+          puts "error while downloading asset #{elem} #{attribute} #{elem[attribute]} #{e}"
+          puts "skipping.."
+        end
+      end
+    end
+  end
+
+  def download_and_return_archived_path(path)
+    asset_uri = if URI(path).is_a? URI::HTTPS # in case it is an external link
+      URI(path)
+    elsif URI(path).is_a? URI::Generic
+      if @uri.hostname.split('').select{|letter| letter == '.'}.count > 1 # check for subdomain
+        URI("https://#{@uri.hostname}/#{path}")
+      else
+        # accessing without www can sometimes be an issue with google, and other websites
+        # so we add www. just in case
+        URI("https://www.#{@uri.hostname}/#{path}")
+      end
+    end
+
+    Dir.mkdir("assets/#{@hostname}") rescue Errno::EEXIST # incase the folder already exists
+    Dir.mkdir("assets/#{@hostname}/#{@request_uri}") rescue Errno::EEXIST # incase the folder already exists
+
+    file_path = "#{__dir__}/assets/#{@hostname}/#{@request_uri}/#{path.split('/').last}"
+
+    File.write(file_path, open(asset_uri).read)
+
+    file_path
+  end
+
+  def handle_meta_data
+    @meta[:last_fetch] = last_fetched_at_meta_data
+    save_meta_data
+    @meta.merge!(page_meta_data)
+  end
+
+  def save_meta_data
+    meta_data = Nokogiri::XML::Node.new "meta", @document
+    meta_data['name'] = "ruby-fetcher-meta-last-fetch"
+    meta_data['content'] = DateTime.now.new_offset(0).strftime("%a %b %e %Y %T UTC")
+    @document.at('meta').add_next_sibling(meta_data)
+  end
+
+  def last_fetched_at_meta_data
+    doc = Nokogiri::HTML(File.open(@html_file_path).read)
+    doc.css("meta[name='ruby-fetcher-meta-last-fetch']").first&.attributes['content']&.value
+  rescue Errno::ENOENT # in case it's the first time the user fetches this page
+  end
+
+  def page_meta_data
+    {
+      num_links: @document.css('a').count,
+      images: @document.css('img').count
+    }
+  end
+
+  def display_meta_data
+    @meta.each do |k,v|
+      puts "#{k}: #{v}"
+    end
+  end
+end
+
+show_meta = ARGV.delete('--metadata')
+cache_assets = ARGV.delete('--download_assets')
+
+Fetch.new(links: ARGV, show_meta: show_meta, cache_assets: cache_assets).run
